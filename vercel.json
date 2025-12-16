@@ -1,0 +1,13 @@
+{
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "build": {
+    "env": {
+      "PROXY_TOKEN": "@proxy-token",
+      "OPENAI_BASE_URL": "https://hiring-proxy.gtx.dev/openai",
+      "ANTHROPIC_BASE_URL": "https://hiring-proxy.gtx.dev/anthropic"
+    }
+  }
+}
