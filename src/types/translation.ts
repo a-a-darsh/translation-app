@@ -18,6 +18,11 @@ export interface TranslationRequest {
 export interface TranslationResponse {
     translatedText: string;
     provider: Provider;
+
+    // Added: language check + "did you mean" support
+    detectedLanguage: string,
+    languageMismatch: boolean,
+    suggestedText: string
 }
 
 export interface JsonTranslationRequest {

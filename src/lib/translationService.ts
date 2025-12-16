@@ -3,10 +3,10 @@
 
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { 
-  TranslationRequest, 
-  TranslationResponse, 
-  JsonTranslationRequest, 
+import {
+  TranslationRequest,
+  TranslationResponse,
+  JsonTranslationRequest,
   JsonTranslationResponse,
   Provider,
   ApiError,
@@ -28,71 +28,175 @@ const anthropic = new Anthropic({
   dangerouslyAllowBrowser: true // Required for client-side usage
 });
 
+type AiLanguageCheckResult = {
+  detectedLanguage: string;
+  languageMismatch: boolean;
+  suggestedText: string; // empty string if no mismatch
+  translatedText: string;
+};
+
+function safeParseAiJson(text: string): AiLanguageCheckResult | null {
+  try {
+    const parsed = JSON.parse(text);
+
+    if (
+        parsed &&
+        typeof parsed.detectedLanguage === 'string' &&
+        typeof parsed.languageMismatch === 'boolean' &&
+        typeof parsed.suggestedText === 'string' &&
+        typeof parsed.translatedText === 'string'
+    ) {
+      return parsed as AiLanguageCheckResult;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Translates plain text using the selected AI provider
- * @param request - Translation request with text, languages, and provider
- * @returns Promise with translated text
+ * Also checks if input matches selected source language; if not,
+ * performs phonetic (not semantic) conversion into the selected source language’s writing system,
+ * then translates that result to the target language (often nonsense).
  */
 export async function translateText(request: TranslationRequest): Promise<TranslationResponse> {
   try {
     const { text, sourceLanguage, targetLanguage, provider } = request;
-    
-    // Create the translation prompt
-    const prompt = `Translate the following text from ${sourceLanguage} to ${targetLanguage}. 
-    Only return the translation, no additional text or explanations.
-    
-    Text to translate: "${text}"`;
 
-    let translatedText: string;
+    const systemInstruction = `
+You are a language detector + strict translation pipeline.
 
+Goal:
+1) Detect the actual language of the user's input text. 
+   - When the script given is different than the input language's script and the text in that script does not phonetically resemble the input language: first check if the characters in the incorrect script correspond to correct characters on any common keyboard layouts. For example, 'ㅎㄷㅅ ㅡㄷ ㅐㅕㅅ ㅐㄹ ㅗㄷㄱㄷ' is in Hangul script, but maps to 'Get me out of here' on a standard qwerty keyboard. In this case, languageMismatch is True and suggestedText is 'Get me out of here'.
+   - If the previous case fails, convert it phonetically to the selected input language. If the text phonetically resembles the selected input language but is in the wrong script, languageMismatch = False. For example if my input language is english and I write 핼로, this is still clearly 'hello' even if it is in the wrong script, so language mismatch = False. In this case, the detected language is english even if it is written in hangeul.
+2) Compare it to the user's selected source language.
+3) If the input language does NOT match the selected source language:
+   - Create a PHONETIC transliteration of the input into the WRITING SYSTEM typically used for the selected source language (language mismatch is true and suggested text is '')
+   - This is NOT a semantic translation. Preserve approximate pronunciation.
+   - Then translate THAT phonetic string into the target language.
+  If it matches:
+   - Translate the original input text from selected source language to target language normally.
+
+Output MUST be valid JSON only, with EXACT keys:
+{
+  "detectedLanguage": string,
+  "languageMismatch": boolean,
+  "suggestedText": string,
+  "translatedText": string
+}
+
+Rules:
+- "detectedLanguage" should be a human language name (e.g. "English", "Korean", "Japanese"). 
+If the given phonetically resembles the selected input language, but is in the wrong script, detectedLanguage == sourceLanguage. For example, if you write Japanese in latin script, or english in katakana, detectedLanguage would be "Japanese" and "English" respectively.
+- "languageMismatch" is true iff detectedLanguage differs from the selected source language. Example: "콘니치와" when input language is "Japanese" => languageMismatch = FALSE because the word is japanese even if it is written using the korean alphabet. Example: "안녕하세요" when input language is "Japanese" => languageMismatch = TRUE because the word is korean. 
+- "suggestedText" must contain the phonetic transliteration ONLY if the input text when converted to the right script phonetically resembles the input language. clean up the string to be correctly spelled in the input language (for example, "하이" given as input with english selected would mean "phoneticTextUsed" should be "Hi"). If the script and selected input language are both correct (meaning no phonetic conversion) it should be "".
+- Do NOT include any extra keys or commentary.
+- ALWAYS check for keyboard mapped equivalence before translating the phonetic string. "좀ㅅ ㅑㄴ ㅕㅔ" = "what is up"
+- If the input is gibberish, detectedLanguage = sourceLanguage && DO NOT set "suggestedText" to a non-empty string.
+`.trim();
+
+    const userContent = `
+Selected source language: ${sourceLanguage}
+Target language: ${targetLanguage}
+
+User input:
+${text}
+`.trim();
+
+    let result: AiLanguageCheckResult | null = null;
     if (provider === 'openai') {
-      // Use OpenAI's GPT model for translation
       const response = await openai.chat.completions.create({
         model: 'gpt-3.5-turbo',
         messages: [
-          {
-            role: 'system',
-            content: 'You are a professional translator. Translate text accurately and naturally. Return only the translation without any additional text.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userContent }
         ],
-        temperature: 0.3, // Lower temperature for more consistent translations
-        max_tokens: 1000
+        temperature: 0.2,
+        max_tokens: 900
       });
 
-      translatedText = response.choices[0]?.message?.content?.trim() || '';
-      
+      const raw = response.choices[0]?.message?.content?.trim() || '';
+      result = safeParseAiJson(raw);
+      console.log(result)
+
+      if (!result) {
+        // Fallback: if model didn't produce valid JSON, do a normal translation
+        const fallback = await openai.chat.completions.create({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            {
+              role: 'system',
+              content:
+                  'You are a professional translator. Translate text accurately and naturally. Return only the translation without any additional text.'
+            },
+            {
+              role: 'user',
+              content: `Translate from ${sourceLanguage} to ${targetLanguage}. Text: "${text}"`
+            }
+          ],
+          temperature: 0.3,
+          max_tokens: 1000
+        });
+
+        const translatedText = fallback.choices[0]?.message?.content?.trim() || '';
+        if (!translatedText) throw new Error('No translation received from the API');
+
+        return { translatedText, provider, detectedLanguage: sourceLanguage, languageMismatch: false, suggestedText: '' };
+      }
     } else if (provider === 'anthropic') {
-      // Use Anthropic's Claude model for translation
       const response = await anthropic.messages.create({
         model: 'claude-3-haiku-20240307',
-        max_tokens: 1000,
-        temperature: 0.3,
+        max_tokens: 900,
+        temperature: 0.2,
         messages: [
           {
             role: 'user',
-            content: prompt
+            content: `${systemInstruction}\n\n${userContent}`
           }
         ]
       });
 
-      translatedText = response.content[0]?.type === 'text' ? response.content[0].text.trim() : '';
+      const raw =
+          response.content[0]?.type === 'text' ? response.content[0].text.trim() : '';
+      result = safeParseAiJson(raw);
+
+      if (!result) {
+        // Simple fallback
+        const fallback = await anthropic.messages.create({
+          model: 'claude-3-haiku-20240307',
+          max_tokens: 1000,
+          temperature: 0.3,
+          messages: [
+            {
+              role: 'user',
+              content: `Translate the following text from ${sourceLanguage} to ${targetLanguage}. Only return the translation.\n\nText: "${text}"`
+            }
+          ]
+        });
+
+        const translatedText =
+            fallback.content[0]?.type === 'text' ? fallback.content[0].text.trim() : '';
+        if (!translatedText) throw new Error('No translation received from the API');
+
+        return { translatedText, provider, detectedLanguage: sourceLanguage, languageMismatch: false, suggestedText: '' };
+      }
     } else {
       throw new Error('Invalid provider selected');
     }
 
-    if (!translatedText) {
+    if (!result.translatedText) {
       throw new Error('No translation received from the API');
     }
 
     return {
-      translatedText,
-      provider
+      translatedText: result.translatedText,
+      provider,
+      detectedLanguage: result.detectedLanguage,
+      languageMismatch: result.languageMismatch,
+      suggestedText: result.suggestedText
     };
-
   } catch (error) {
     console.error('Translation error:', error);
     throw {
@@ -111,10 +215,10 @@ export async function translateText(request: TranslationRequest): Promise<Transl
  * @returns Promise with translated JSON object
  */
 async function translateJsonRecursive(
-  obj: JsonValue, 
-  sourceLanguage: string, 
-  targetLanguage: string, 
-  provider: Provider
+    obj: JsonValue,
+    sourceLanguage: string,
+    targetLanguage: string,
+    provider: Provider
 ): Promise<JsonValue> {
   if (typeof obj === 'string') {
     // Translate string values
@@ -145,11 +249,8 @@ async function translateJsonRecursive(
   }
 }
 
-/**
- * Translates a JSON object while preserving its structure
- * @param request - JSON translation request
- * @returns Promise with translated JSON
- */
+// ... existing code ...
+
 export async function translateJson(request: JsonTranslationRequest): Promise<JsonTranslationResponse> {
   try {
     const { jsonData, sourceLanguage, targetLanguage, provider } = request;
@@ -166,7 +267,6 @@ export async function translateJson(request: JsonTranslationRequest): Promise<Js
       translatedJson,
       provider
     };
-
   } catch (error) {
     console.error('JSON translation error:', error);
     throw {
@@ -176,11 +276,8 @@ export async function translateJson(request: JsonTranslationRequest): Promise<Js
   }
 }
 
-/**
- * Validates JSON string format
- * @param jsonString - String to validate
- * @returns Parsed JSON object if valid, throws error if invalid
- */
+// ... existing code ...
+
 export function validateJson(jsonString: string): JsonValue {
   try {
     return JSON.parse(jsonString);
