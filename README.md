@@ -20,12 +20,8 @@ A Next.js + React + TypeScript translation app that supports **text translation*
   - languageMismatch (typing valid words from another language)
   - suggestedText (If the language is correct, but there are errors such as wrong script or typos)
   - translatedText
-
-### 3) OpenAI Responses API
-- OpenAI calls use the **Responses API** (`client.responses.create`) rather than Chat Completions.
-- Because Responses can return text in different shapes, a helper is used to extract the final text safely.
-
-### 4) JSON translation
+- These values inform how the UI handles the input. If they are in the wrong language or wrong script, it suggests you to change language or correct the script.
+### 3) JSON translation
 - JSON translation accepts a pasted JSON document.
 - It parses JSON locally first; if parsing fails, the UI shows an error message.
 - Translation is applied **only to string values**:
