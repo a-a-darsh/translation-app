@@ -1,7 +1,7 @@
 // Language configuration for the translation app
 // This file contains all supported languages with their codes and names
 
-import { Language, Provider } from '../types/translation';
+import { Language, Provider, Model } from '../types/translation';
 
 /**
  * List of supported languages for translation
@@ -35,9 +35,24 @@ export const supportedLanguages: Language[] = [
  * Each provider has an ID and display name
  */
 export const providers = [
-    { id: 'openai' as Provider, name: 'OpenAI GPT-3.5' },
-    { id: 'anthropic' as Provider, name: 'Anthropic Claude' }
+    { id: 'openai' as Provider, name: 'OpenAI' },
+    { id: 'anthropic' as Provider, name: 'Anthropic' }
 ];
+
+/**
+ * Models available per provider
+ */
+export const providerModels: Record<Provider, Array<{ id: Model; name: string }>> = {
+    openai: [
+        { id: 'gpt-3.5-turbo', name: 'GPT‑3.5 Turbo' },
+        { id: 'gpt-4o-mini', name: 'GPT‑4o mini' },
+        { id: 'gpt-5-mini', name: 'GPT‑5-mini' }
+    ],
+    anthropic: [
+        { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku' },
+        { id: 'claude-3-5-sonnet-latest', name: 'Claude 3.5 Sonnet (latest)' }
+    ]
+};
 
 /**
  * Default language selections
@@ -51,3 +66,8 @@ export const defaultLanguages = {
  * Default provider selection
  */
 export const defaultProvider: Provider = 'openai';
+
+export const defaultModelByProvider: Record<Provider, Model> = {
+    openai: 'gpt-3.5-turbo',
+    anthropic: 'claude-3-haiku-20240307'
+};

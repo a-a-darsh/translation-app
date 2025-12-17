@@ -3,6 +3,11 @@
 
 export type Provider = 'openai' | 'anthropic';
 
+export type OpenAIModel = 'gpt-3.5-turbo' | 'gpt-4o-mini' | 'gpt-4o-search-preview' | 'gpt-5-mini';
+export type AnthropicModel = 'claude-3-haiku-20240307' | 'claude-3-5-sonnet-latest';
+
+export type Model = OpenAIModel | AnthropicModel;
+
 export interface Language {
     code: string;
     name: string;
@@ -13,6 +18,7 @@ export interface TranslationRequest {
     sourceLanguage: string;
     targetLanguage: string;
     provider: Provider;
+    model: Model;
 }
 
 export interface TranslationResponse {
@@ -30,6 +36,7 @@ export interface JsonTranslationRequest {
     sourceLanguage: string;
     targetLanguage: string;
     provider: Provider;
+    model: Model;
 }
 
 // Define a proper type for JSON values to avoid 'any'

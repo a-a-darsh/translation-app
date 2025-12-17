@@ -12,7 +12,8 @@ import {
   ApiError,
   JsonValue,
   JsonObject,
-  JsonArray
+  JsonArray,
+  Model
 } from '../types/translation';
 
 // Initialize API clients with proxy settings
@@ -54,6 +55,25 @@ function safeParseAiJson(text: string): AiLanguageCheckResult | null {
   }
 }
 
+function normOneLine(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function looksUntranslated(args: {
+  original: string;
+  translated: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+}): boolean {
+  const { original, translated, sourceLanguage, targetLanguage } = args;
+
+  if (!original.trim() || !translated.trim()) return false;
+  if (sourceLanguage.trim() === targetLanguage.trim()) return false;
+
+  // If output is identical to input, it very likely wasn’t translated.
+  return normOneLine(original) === normOneLine(translated);
+}
+
 /**
  * Translates plain text using the selected AI provider
  * Also checks if input matches selected source language; if not,
@@ -62,40 +82,114 @@ function safeParseAiJson(text: string): AiLanguageCheckResult | null {
  */
 export async function translateText(request: TranslationRequest): Promise<TranslationResponse> {
   try {
-    const { text, sourceLanguage, targetLanguage, provider } = request;
+    const { text, sourceLanguage, targetLanguage, provider, model } = request;
 
     const systemInstruction = `
-You are a language detector + strict translation pipeline.
+    You are a language detection + translation pipeline.
+    Return VALID JSON ONLY with EXACT keys:
+    {
+      "detectedLanguage": string,
+      "languageMismatch": boolean,
+      "suggestedText": string,
+      "translatedText": string
+    }
+    
+    DEFINITIONS (CRITICAL)
+    - "Language mismatch" ONLY means: the input is actually written in a different human language than the selected sourceLanguage.
+    - If the user intended the selected sourceLanguage but typed it in the wrong script (keyboard layout mistake or phonetic wrong-script),
+      that is NOT a language mismatch. In that case: languageMismatch MUST be false, and suggestedText contains the corrected sourceLanguage text.
+    - suggestedText MUST be "" unless you performed a real conversion that produces a DIFFERENT string than the original input.
+    
+    ==================================================
+    STEP 1 — DETECT + CORRECT INPUT (IN THIS ORDER)
+    ==================================================
+    
+    Input:
+    - selected sourceLanguage
+    - user input text
+    
+    Your job in Step 1 is to decide:
+    (A) Is the input normal and valid for the source language (i.e. Correct Script = True, Valid words = True). If the input meets these conditions, skip to the Translation Step.
+    (B) If the above fails, check is it actually another language? (languageMismatch = true)
+    (C) If the above fails, is it the selected sourceLanguage but written incorrectly (wrong script / wrong keyboard)? (languageMismatch = false, suggestedText set)
+    (D) Or is it gibberish? (languageMismatch = false, suggestedText="")
+    
+    Always follow checks in this exact order:
+    
+    --------------------------------------------------
+    1) KEYBOARD LAYOUT MAPPING CHECK (DO THIS FIRST)
+    --------------------------------------------------
+    Condition: The input text appears to be typed using the keyboard layout of a different script than sourceLanguage.
+    
+    Action:
+    - Treat the input characters as literal key presses on the OTHER keyboard layout.
+    - Remap those key positions into the keyboard layout for sourceLanguage.
+    - If the literal mapped string becomes readable/coherent in sourceLanguage:
+      - detectedLanguage = sourceLanguage
+      - languageMismatch = false
+      - suggestedText = mapped string (trim + normalize spaces only)
+      - STOP Step 1.
+    
+    If mapping does not produce readable sourceLanguage text:
+    - suggestedText = ""
+    - Continue.
+    
+    --------------------------------------------------
+    2) PHONETIC WRONG-SCRIPT CHECK (ONLY IF #1 FAILED)
+    --------------------------------------------------
+    Condition: The input is in the wrong script for sourceLanguage, but phonetically resembles sourceLanguage.
+    
+    Action:
+    - Convert the input into the normal writing system of sourceLanguage, preserving pronunciation (NOT semantic translation).
+    - If conversion is plausible:
+      - detectedLanguage = sourceLanguage
+      - languageMismatch = false
+      - suggestedText = {input text written in source script}
+      - STOP Step 1.
+    
+    Examples (sourceLanguage=English):
+    - input "핼로" -> detectedLanguage="English", languageMismatch=false, suggestedText="hello"
+    
+    
+    Examples (sourceLanguage=Japanese):
+    - input "konnichiwa" or "kon'nichiwa" -> detectedLanguage="Japanese", languageMismatch=false, suggestedText="こんにちは"
+    
+    IMPORTANT:
+    - This is NOT a language mismatch. languageMismatch MUST remain false.
+    
+    --------------------------------------------------
+    3) TRUE LANGUAGE CHECK (ONLY IF #1 AND #2 FAILED)
+    --------------------------------------------------
+    If the input is valid, meaningful text in some other language (not sourceLanguage):
+      - detectedLanguage = that other language
+      - languageMismatch = true
+      - suggestedText = ""   (do NOT "correct" it)
+      - STOP Step 1.
+    
+    --------------------------------------------------
+    4) GIBBERISH CHECK (ONLY IF NONE OF THE ABOVE APPLY)
+    --------------------------------------------------
+    If the input is gibberish / not meaningful in any language:
+      - detectedLanguage = sourceLanguage
+      - languageMismatch = false
+      - suggestedText = ""
+      - STOP Step 1.
+    
+    ==================================================
+    STEP 2 — TRANSLATION
+    ==================================================
+    Rules:
+    - Determine sourceTextForTranslation:
+      - If suggestedText != "" use suggestedText
+      - Else use original input text
+    - Translate sourceTextForTranslation from sourceLanguage -> targetLanguage.
+    - translatedText MUST be in targetLanguage (script + language).
+    
+    IMPORTANT:
+    - Even if detectedLanguage != sourceLanguage (languageMismatch=true), you MUST still produce translatedText.
+      (Translate the original input as-is into targetLanguage.)
+    `.trim();
 
-Goal:
-1) Detect the actual language of the user's input text. 
-   - When the script given is different than the input language's script and the text in that script does not phonetically resemble the input language: first check if the characters in the incorrect script correspond to correct characters on any common keyboard layouts. For example, 'ㅎㄷㅅ ㅡㄷ ㅐㅕㅅ ㅐㄹ ㅗㄷㄱㄷ' is in Hangul script, but maps to 'Get me out of here' on a standard qwerty keyboard. In this case, languageMismatch is True and suggestedText is 'Get me out of here'.
-   - If the previous case fails, convert it phonetically to the selected input language. If the text phonetically resembles the selected input language but is in the wrong script, languageMismatch = False. For example if my input language is english and I write 핼로, this is still clearly 'hello' even if it is in the wrong script, so language mismatch = False. In this case, the detected language is english even if it is written in hangeul.
-2) Compare it to the user's selected source language.
-3) If the input language does NOT match the selected source language:
-   - Create a PHONETIC transliteration of the input into the WRITING SYSTEM typically used for the selected source language (language mismatch is true and suggested text is '')
-   - This is NOT a semantic translation. Preserve approximate pronunciation.
-   - Then translate THAT phonetic string into the target language.
-  If it matches:
-   - Translate the original input text from selected source language to target language normally.
-
-Output MUST be valid JSON only, with EXACT keys:
-{
-  "detectedLanguage": string,
-  "languageMismatch": boolean,
-  "suggestedText": string,
-  "translatedText": string
-}
-
-Rules:
-- "detectedLanguage" should be a human language name (e.g. "English", "Korean", "Japanese"). 
-If the given phonetically resembles the selected input language, but is in the wrong script, detectedLanguage == sourceLanguage. For example, if you write Japanese in latin script, or english in katakana, detectedLanguage would be "Japanese" and "English" respectively.
-- "languageMismatch" is true iff detectedLanguage differs from the selected source language. Example: "콘니치와" when input language is "Japanese" => languageMismatch = FALSE because the word is japanese even if it is written using the korean alphabet. Example: "안녕하세요" when input language is "Japanese" => languageMismatch = TRUE because the word is korean. 
-- "suggestedText" must contain the phonetic transliteration ONLY if the input text when converted to the right script phonetically resembles the input language. clean up the string to be correctly spelled in the input language (for example, "하이" given as input with english selected would mean "phoneticTextUsed" should be "Hi"). If the script and selected input language are both correct (meaning no phonetic conversion) it should be "".
-- Do NOT include any extra keys or commentary.
-- ALWAYS check for keyboard mapped equivalence before translating the phonetic string. "좀ㅅ ㅑㄴ ㅕㅔ" = "what is up"
-- If the input is gibberish, detectedLanguage = sourceLanguage && DO NOT set "suggestedText" to a non-empty string.
-`.trim();
 
     const userContent = `
 Selected source language: ${sourceLanguage}
@@ -108,13 +202,11 @@ ${text}
     let result: AiLanguageCheckResult | null = null;
     if (provider === 'openai') {
       const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model,
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: userContent }
         ],
-        temperature: 0.2,
-        max_tokens: 900
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || '';
@@ -124,7 +216,7 @@ ${text}
       if (!result) {
         // Fallback: if model didn't produce valid JSON, do a normal translation
         const fallback = await openai.chat.completions.create({
-          model: 'gpt-3.5-turbo',
+          model,
           messages: [
             {
               role: 'system',
@@ -137,7 +229,7 @@ ${text}
             }
           ],
           temperature: 0.3,
-          max_tokens: 1000
+
         });
 
         const translatedText = fallback.choices[0]?.message?.content?.trim() || '';
@@ -147,7 +239,7 @@ ${text}
       }
     } else if (provider === 'anthropic') {
       const response = await anthropic.messages.create({
-        model: 'claude-3-haiku-20240307',
+        model,
         max_tokens: 900,
         temperature: 0.2,
         messages: [
@@ -156,6 +248,7 @@ ${text}
             content: `${systemInstruction}\n\n${userContent}`
           }
         ]
+
       });
 
       const raw =
@@ -165,7 +258,7 @@ ${text}
       if (!result) {
         // Simple fallback
         const fallback = await anthropic.messages.create({
-          model: 'claude-3-haiku-20240307',
+          model,
           max_tokens: 1000,
           temperature: 0.3,
           messages: [
@@ -190,6 +283,69 @@ ${text}
       throw new Error('No translation received from the API');
     }
 
+    // Normalize suggestedText contract:
+    if (result.languageMismatch) {
+      const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+      if (!result.suggestedText || norm(result.suggestedText) === norm(text)) {
+        result.suggestedText = '';
+      }
+    }
+    let suggested : string = result.suggestedText;
+    if (suggested === userContent) {
+      result.suggestedText = '';
+    }
+
+    let verify = await openai.responses.create({
+    model,
+    instructions:  `You are a verification and correction function.
+                    
+                    Rules (must follow exactly):
+                    - Output ONLY the final translated text.
+                    - Do NOT include labels, prefixes, explanations, or quotes.
+                    - Do NOT include words like "Translation", "Corrected", or similar.
+                    - If the attempt is already in the target language, output it unchanged.
+                    - If it is not, output the corrected translation in the target language.`,
+    input: `Source: ${sourceLanguage} Target: ${targetLanguage}.\n\nTranslation Attempt:\n${result.translatedText}`
+    })
+    result.translatedText = verify.output_text
+
+    // NEW: If the model "translated" by returning the original text, retry with a strict translator.
+    if (result.suggestedText === result.translatedText) {
+      if (provider === 'openai') {
+        const retry = await openai.responses.create({
+          model,
+          instructions:
+            'You are a professional translator. Translate accurately and naturally. Return ONLY the translation. Do not repeat the input.',
+          input: `Translate from ${sourceLanguage} to ${targetLanguage}.\n\nText:\n${text}`
+        });
+
+        const retryText = getOpenAIResponseText(retry);
+        if (retryText) {
+          result.translatedText = retryText;
+        }
+      } else if (provider === 'anthropic') {
+        const retry = await anthropic.messages.create({
+          model,
+          max_tokens: 1000,
+          temperature: 0.2,
+          messages: [
+            {
+              role: 'user',
+              content:
+                `Translate from ${sourceLanguage} to ${targetLanguage}. ` +
+                `Return ONLY the translation. Do not repeat the input.\n\nText:\n${text}`
+            }
+          ]
+        });
+
+        const retryText =
+          retry.content[0]?.type === 'text' ? retry.content[0].text.trim() : '';
+        if (retryText) {
+          result.translatedText = retryText;
+        }
+      }
+    }
+
     return {
       translatedText: result.translatedText,
       provider,
@@ -212,13 +368,15 @@ ${text}
  * @param sourceLanguage - Source language code
  * @param targetLanguage - Target language code
  * @param provider - AI provider to use
+ * @param model - Model to use
  * @returns Promise with translated JSON object
  */
 async function translateJsonRecursive(
     obj: JsonValue,
     sourceLanguage: string,
     targetLanguage: string,
-    provider: Provider
+    provider: Provider,
+    model: Model
 ): Promise<JsonValue> {
   if (typeof obj === 'string') {
     // Translate string values
@@ -226,21 +384,22 @@ async function translateJsonRecursive(
       text: obj,
       sourceLanguage,
       targetLanguage,
-      provider
+      provider,
+      model
     });
     return translation.translatedText;
   } else if (Array.isArray(obj)) {
     // Recursively translate array elements
     const translatedArray: JsonArray = [];
     for (const item of obj) {
-      translatedArray.push(await translateJsonRecursive(item, sourceLanguage, targetLanguage, provider));
+      translatedArray.push(await translateJsonRecursive(item, sourceLanguage, targetLanguage, provider, model));
     }
     return translatedArray;
   } else if (typeof obj === 'object' && obj !== null) {
     // Recursively translate object properties
     const translatedObj: JsonObject = {};
     for (const [key, value] of Object.entries(obj)) {
-      translatedObj[key] = await translateJsonRecursive(value, sourceLanguage, targetLanguage, provider);
+      translatedObj[key] = await translateJsonRecursive(value, sourceLanguage, targetLanguage, provider, model);
     }
     return translatedObj;
   } else {
@@ -253,7 +412,7 @@ async function translateJsonRecursive(
 
 export async function translateJson(request: JsonTranslationRequest): Promise<JsonTranslationResponse> {
   try {
-    const { jsonData, sourceLanguage, targetLanguage, provider } = request;
+    const { jsonData, sourceLanguage, targetLanguage, provider, model } = request;
 
     // Validate JSON input
     if (!jsonData || typeof jsonData !== 'object') {
@@ -261,7 +420,7 @@ export async function translateJson(request: JsonTranslationRequest): Promise<Js
     }
 
     // Translate the JSON recursively
-    const translatedJson = await translateJsonRecursive(jsonData, sourceLanguage, targetLanguage, provider);
+    const translatedJson = await translateJsonRecursive(jsonData, sourceLanguage, targetLanguage, provider, model);
 
     return {
       translatedJson,
@@ -288,3 +447,28 @@ export function validateJson(jsonString: string): JsonValue {
     } as ApiError;
   }
 }
+
+type OpenAIResponsesLike = {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+};
+
+function getOpenAIResponseText(response: unknown): string {
+  const r = response as OpenAIResponsesLike;
+
+  if (typeof r.output_text === 'string') return r.output_text.trim();
+
+  const joined =
+      Array.isArray(r.output)
+          ? r.output
+              .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
+              .filter((c) => c?.type === 'output_text' && typeof c?.text === 'string')
+              .map((c) => c.text as string)
+              .join('')
+          : '';
+
+  return joined.trim();
+}
+
